@@ -24,11 +24,15 @@
 ## 安装方法
 
 1. 在 Edge 或 Chrome 浏览器安装 Tampermonkey。
-2. 打开 Tampermonkey，新建一个用户脚本。
-3. 把 `chd-course-helper.user.js` 里的全部内容复制进去。
-4. 保存脚本。
-5. 打开学校教务系统，正常用自己的账号密码登录。
-6. 进入选课页面，看到“选课辅助筛选”工具栏就说明安装成功。
+2. 打开脚本安装链接：
+
+```text
+https://github.com/Met3ORQAQ/chd-course-helper/raw/refs/heads/main/chd-course-helper.user.js
+```
+
+3. Tampermonkey 会自动弹出安装页面，点击“安装”。
+4. 打开学校教务系统，正常用自己的账号密码登录。
+5. 进入选课页面，看到“选课辅助筛选”工具栏就说明安装成功。
 
 如果要发给同学，可以直接发 `release` 文件夹里的 `chd-course-helper.user.js` 和 `安装说明.md`。
 
@@ -69,4 +73,4 @@
 
 ## 当前版本
 
-当前脚本版本：`v0.1.19`
+当前脚本版本：`v0.1.20`

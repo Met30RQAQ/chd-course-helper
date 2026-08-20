@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         CHD Course Helper Prototype
 // @namespace    local.classhelper.chd
-// @version      0.1.19
+// @version      0.1.20
 // @description  Add local course filters and timetable preview highlights to CHD EAMS pages.
 // @match        http://bkjw.chd.edu.cn/eams/*
 // @match        https://bkjw.chd.edu.cn/eams/*
 // @match        https://ids.chd.edu.cn/authserver/*
+// @updateURL    https://github.com/Met3ORQAQ/chd-course-helper/raw/refs/heads/main/chd-course-helper.user.js
+// @downloadURL  https://github.com/Met3ORQAQ/chd-course-helper/raw/refs/heads/main/chd-course-helper.user.js
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
@@ -52,7 +54,7 @@
   ];
   const DETAIL_FETCH_DELAY_MS = 5000;
   const DETAIL_FETCH_LIMIT = 20;
-  const SCRIPT_VERSION = "0.1.19";
+  const SCRIPT_VERSION = "0.1.20";
   const BACKGROUND_READ_PARAM = "chdCourseHelperBgRead";
 
   let state = {
