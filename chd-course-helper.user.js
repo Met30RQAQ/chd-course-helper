@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CHD Course Helper Prototype
 // @namespace    local.classhelper.chd
-// @version      0.1.20
+// @version      0.1.21
 // @description  Add local course filters and timetable preview highlights to CHD EAMS pages.
 // @match        http://bkjw.chd.edu.cn/eams/*
 // @match        https://bkjw.chd.edu.cn/eams/*
@@ -54,7 +54,7 @@
   ];
   const DETAIL_FETCH_DELAY_MS = 5000;
   const DETAIL_FETCH_LIMIT = 20;
-  const SCRIPT_VERSION = "0.1.20";
+  const SCRIPT_VERSION = "0.1.21";
   const BACKGROUND_READ_PARAM = "chdCourseHelperBgRead";
 
   let state = {
@@ -137,14 +137,37 @@
     return result;
   }
 
+  function parseWeekExpression(expression) {
+    const weeks = new Set();
+    const source = normalizeText(expression)
+      .replace(/[，、]/g, ",")
+      .replace(/[~～—–至]/g, "-")
+      .replace(/第|周/g, "");
+
+    source.split(",").forEach((part) => {
+      const segment = part.trim();
+      if (!segment) return;
+
+      const rangeMatch = segment.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+      if (rangeMatch) {
+        range(rangeMatch[1], rangeMatch[2]).forEach((week) => weeks.add(week));
+        return;
+      }
+
+      if (/^\d{1,2}$/.test(segment)) weeks.add(Number(segment));
+    });
+
+    return Array.from(weeks).sort((a, b) => a - b);
+  }
+
   function parseWeeks(text) {
     const weeks = new Set();
     const source = normalizeText(text);
     let match;
 
-    const weekRangePattern = /(\d{1,2})\s*-\s*(\d{1,2})\s*周/g;
-    while ((match = weekRangePattern.exec(source))) {
-      range(match[1], match[2]).forEach((week) => weeks.add(week));
+    const weekExpressionPattern = /((?:\d{1,2}\s*(?:[-~～—–至]\s*\d{1,2})?\s*[,，、]\s*)*\d{1,2}\s*(?:[-~～—–至]\s*\d{1,2})?)\s*周/g;
+    while ((match = weekExpressionPattern.exec(source))) {
+      parseWeekExpression(match[1]).forEach((week) => weeks.add(week));
     }
 
     const parenRangePattern = /[（(]\s*(\d{1,2})\s*-\s*(\d{1,2})\s*[,，]/g;
@@ -187,16 +210,16 @@
   function parseCandidateSchedule(text) {
     const source = normalizeText(text);
     const slots = [];
-    const blockPattern = /(\d{1,2})\s*-\s*(\d{1,2})\s*周[\s\S]{0,80}?(星期[一二三四五六日天])\s*(\d{1,2})\s*(?:-\s*(\d{1,2}))?\s*节/g;
+    const blockPattern = /((?:\d{1,2}\s*(?:[-~～—–至]\s*\d{1,2})?\s*[,，、]\s*)*\d{1,2}\s*(?:[-~～—–至]\s*\d{1,2})?)\s*周[\s\S]{0,80}?(星期[一二三四五六日天])\s*(\d{1,2})\s*(?:[-~～—–至]\s*(\d{1,2}))?\s*节/g;
     let match;
 
     while ((match = blockPattern.exec(source))) {
-      const day = DAY_ALIAS.get(match[3]);
+      const day = DAY_ALIAS.get(match[2]);
       if (!day) continue;
       slots.push({
-        weeks: range(match[1], match[2]),
+        weeks: parseWeekExpression(match[1]),
         day,
-        periods: range(match[4], match[5] || match[4]),
+        periods: range(match[3], match[4] || match[3]),
         raw: normalizeText(match[0]),
       });
     }
@@ -343,6 +366,35 @@
     };
   }
 
+  function getSemesterId(params) {
+    return normalizeText(params && params["semester.id"] || "");
+  }
+
+  function saveTimetableRecord(store, timetable, source, params) {
+    const serialized = serializeTimetable(timetable, source, params);
+    const semesterId = getSemesterId(serialized.params);
+    store.timetable = serialized;
+
+    if (semesterId) {
+      store.timetablesBySemester = store.timetablesBySemester || {};
+      store.timetablesBySemester[semesterId] = serialized;
+    }
+
+    return serialized;
+  }
+
+  function getStoredTimetableRecord(store, semesterId) {
+    const normalizedSemesterId = normalizeText(semesterId || "");
+    if (!normalizedSemesterId) return store.timetable || null;
+
+    const semesterRecord = store.timetablesBySemester && store.timetablesBySemester[normalizedSemesterId];
+    if (semesterRecord) return semesterRecord;
+
+    return getSemesterId(store.timetable && store.timetable.params) === normalizedSemesterId
+      ? store.timetable
+      : null;
+  }
+
   function getCookieValue(name) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const match = document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
@@ -429,6 +481,8 @@
     if (!validTimetableParams(normalized)) return false;
     const store = loadStore();
     store.timetableParams = normalized;
+    store.timetableParamsBySemester = store.timetableParamsBySemester || {};
+    store.timetableParamsBySemester[normalized["semester.id"]] = normalized;
     saveStore(store);
     return true;
   }
@@ -458,7 +512,15 @@
   }
 
   function getBackgroundReadId() {
-    return new URLSearchParams(location.search).get(BACKGROUND_READ_PARAM) || "";
+    const queryId = new URLSearchParams(location.search).get(BACKGROUND_READ_PARAM) || "";
+    if (queryId) return queryId;
+
+    const pending = loadStore().backgroundRead || {};
+    const updatedAt = Date.parse(pending.updatedAt || "");
+    const isFresh = Number.isFinite(updatedAt) && Date.now() - updatedAt < 60000;
+    const isTimetablePage = /courseTableForStd/.test(location.pathname);
+    const isPending = pending.status === "opening" || pending.status === "waiting";
+    return isTimetablePage && isFresh && isPending ? pending.id || "" : "";
   }
 
   function isBackgroundReadPage() {
@@ -524,9 +586,14 @@
       if (state.backgroundRead.timer) {
         window.clearInterval(state.backgroundRead.timer);
         state.backgroundRead.timer = null;
-        setStatus("后台读取超时，可再点一次后台读取或手动设置参数");
+        setStatus("后台读取超时，请检查打开的课表页是否正常加载");
+        updateBackgroundReadStore({
+          id: requestId,
+          status: "failed",
+          message: "后台读取课表超时",
+        });
       }
-    }, 20000);
+    }, 30000);
   }
 
   function finishBackgroundTimetableRead(timetable) {
@@ -592,21 +659,36 @@
     const current = collectTimetableParams(document);
     if (validTimetableParams(current)) return current;
 
+    const currentSemesterId = getSemesterId(current) || getCookieValue("semester.id");
+    let entryError = null;
+
+    try {
+      const response = await fetch(new URL("/eams/courseTableForStd.action", location.href).href, {
+        credentials: "include",
+      });
+      if (!response.ok) throw new Error(`课表入口 HTTP ${response.status}`);
+
+      const html = await response.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const params = collectTimetableParams(doc, html);
+      if (validTimetableParams(params)) {
+        saveTimetableParams(params);
+        return params;
+      }
+      entryError = new Error("课表入口未提供 ids/semester.id");
+    } catch (error) {
+      entryError = error;
+    }
+
     const store = loadStore();
-    if (validTimetableParams(store.timetableParams)) return store.timetableParams;
+    const cachedParams = currentSemesterId && store.timetableParamsBySemester
+      ? store.timetableParamsBySemester[currentSemesterId]
+      : store.timetableParams;
+    if (validTimetableParams(cachedParams) && (!currentSemesterId || getSemesterId(cachedParams) === currentSemesterId)) {
+      return normalizeTimetableParams(cachedParams);
+    }
 
-    const response = await fetch(new URL("/eams/courseTableForStd.action", location.href).href, {
-      credentials: "include",
-    });
-    if (!response.ok) throw new Error(`课表入口 HTTP ${response.status}`);
-
-    const html = await response.text();
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const params = collectTimetableParams(doc, html);
-    if (!validTimetableParams(params)) throw new Error("未找到课表参数 ids/semester.id");
-
-    saveTimetableParams(params);
-    return params;
+    throw entryError || new Error("未找到当前学期课表参数 ids/semester.id");
   }
 
   function splitJsArgs(text) {
@@ -806,8 +888,13 @@
 
     fullTimetable.source = source || fullTimetable.source;
     const store = loadStore();
-    if (validTimetableParams(params)) store.timetableParams = normalizeTimetableParams(params);
-    store.timetable = serializeTimetable(fullTimetable, fullTimetable.source, params);
+    if (validTimetableParams(params)) {
+      const normalizedParams = normalizeTimetableParams(params);
+      store.timetableParams = normalizedParams;
+      store.timetableParamsBySemester = store.timetableParamsBySemester || {};
+      store.timetableParamsBySemester[normalizedParams["semester.id"]] = normalizedParams;
+    }
+    saveTimetableRecord(store, fullTimetable, fullTimetable.source, params);
     saveStore(store);
 
     finishBackgroundTimetableRead(fullTimetable);
@@ -853,7 +940,9 @@
 
       const store = loadStore();
       store.timetableParams = params;
-      store.timetable = serializeTimetable(fullTimetable, fullTimetable.source, params);
+      store.timetableParamsBySemester = store.timetableParamsBySemester || {};
+      store.timetableParamsBySemester[params["semester.id"]] = params;
+      saveTimetableRecord(store, fullTimetable, fullTimetable.source, params);
       saveStore(store);
 
       const visibleTimetable = parseTimetable();
@@ -862,7 +951,7 @@
       if (force) setStatus("完整课表已更新");
       maybeStartDetailFetch();
     } catch (error) {
-      setStatus(`完整课表读取失败，暂用缩略课表：${error && error.message ? error.message : error}`);
+      setStatus(`完整课表读取失败，当前仅使用已有页面课表：${error && error.message ? error.message : error}`);
     } finally {
       state.timetableFetch.running = false;
     }
@@ -891,6 +980,7 @@
       if (labels.includes("课程名称") && labels.some((label) => label.includes("课程安排"))) {
         const map = {};
         labels.forEach((label, index) => {
+          const compactLabel = label.replace(/\s/g, "");
           if (label.includes("课程序号")) map.serial = index;
           if (label.includes("课程代码")) map.code = index;
           if (label.includes("课程名称")) map.name = index;
@@ -900,7 +990,7 @@
           if (label.includes("周课时")) map.weekHours = index;
           if (label.includes("校区")) map.campus = index;
           if (label.includes("备注")) map.note = index;
-          if (label.includes("已选")) map.capacity = index;
+          if (/^已选[\/／]上限$/.test(compactLabel)) map.capacity = index;
           if (label.includes("课程安排")) map.schedule = index;
           if (label.includes("操作")) map.action = index;
         });
@@ -911,7 +1001,7 @@
   }
 
   function parseCapacity(text) {
-    const match = normalizeText(text).match(/(\d+)\s*\/\s*(\d+)/);
+    const match = normalizeText(text).match(/(\d+)\s*[\/／]\s*(\d+)/);
     if (!match) return { selected: null, limit: null, hasSeat: null };
     const selected = Number(match[1]);
     const limit = Number(match[2]);
@@ -965,6 +1055,7 @@
 
       const serial = textOf(cells[map.serial]);
       const code = textOf(cells[map.code]);
+      const capacityCell = row.querySelector("td.stdCount") || cells[map.capacity];
       const detail = getCachedDetail({ serial, code, name }, details);
       const course = {
         id: `${serial || code || name}-${index}`,
@@ -977,7 +1068,7 @@
         weekHours: textOf(cells[map.weekHours]),
         campus: textOf(cells[map.campus]),
         note: textOf(cells[map.note]),
-        capacity: parseCapacity(textOf(cells[map.capacity])),
+        capacity: parseCapacity(textOf(capacityCell)),
         scheduleText,
         slots: parseCandidateSchedule(scheduleText),
         buildings: parseScheduleBuildings(scheduleText),
@@ -1030,8 +1121,10 @@
   }
 
   function evaluateCourse(course) {
-    const conflicts = findConflicts(course, state.timetable);
-    const noConflict = conflicts.length === 0;
+    const timetableKnown = Boolean(state.timetable && state.timetable.slots && state.timetable.slots.length);
+    const timeKnown = Boolean(course.slots.length && timetableKnown);
+    const conflicts = timeKnown ? findConflicts(course, state.timetable) : [];
+    const noConflict = timeKnown && conflicts.length === 0;
     const earlyMorning = hasEarlyMorningPeriods(course);
     const selectedBuildings = getSelectedBuildings();
     const activeBuildingFilter = selectedBuildings.length > 0;
@@ -1047,12 +1140,13 @@
     const prerequisite = normalizeText(detail.prerequisite || "");
     const activeExamFilter = state.filters.examKaocha || state.filters.examKaoshi;
     const activeLangFilter = state.filters.langChinese || state.filters.langBilingual;
+    const capacityKnown = course.capacity.hasSeat !== null;
 
     const checks = {
       noConflict,
       morningFriendly: !earlyMorning,
       building: buildingMatch,
-      hasSeat: course.capacity.hasSeat !== false,
+      hasSeat: course.capacity.hasSeat === true,
       noPrerequisite: detailKnown && (!prerequisite || prerequisite === "无"),
       exam: !activeExamFilter || (Boolean(examMode) && (
         (state.filters.examKaocha && examMode.includes("考查")) ||
@@ -1075,9 +1169,9 @@
 
     const reasons = [];
     if (state.filters.noConflict && !checks.noConflict) {
-      reasons.push("时间冲突");
+      reasons.push(timeKnown ? "时间冲突" : (course.slots.length ? "课表未知" : "时间未知"));
     }
-    if (state.filters.hasSeat && !checks.hasSeat) reasons.push("无余量");
+    if (state.filters.hasSeat && !checks.hasSeat) reasons.push(capacityKnown ? "无余量" : "余量未知");
     if (state.filters.morningFriendly && !checks.morningFriendly) reasons.push("含1-2节");
     if (activeBuildingFilter && !checks.building) reasons.push(`教学楼=${formatBuildings(courseBuildings)}`);
     if (noConflict) {
@@ -1095,6 +1189,9 @@
     return {
       conflicts,
       noConflict,
+      timetableKnown,
+      timeKnown,
+      capacityKnown,
       earlyMorning,
       activeBuildingFilter,
       courseBuildings,
@@ -1444,21 +1541,34 @@
     const store = loadStore();
     const visibleTimetable = parseTimetable();
     const currentFullTimetable = parseFullTimetableFromCurrentPage(visibleTimetable);
+    const pageParams = currentFullTimetable && currentFullTimetable.params
+      ? currentFullTimetable.params
+      : collectTimetableParams(document);
+    const pageSemesterId = getSemesterId(pageParams) || getCookieValue("semester.id");
     if (currentFullTimetable) {
-      store.timetable = serializeTimetable(currentFullTimetable, currentFullTimetable.source, currentFullTimetable.params);
-      if (validTimetableParams(currentFullTimetable.params)) store.timetableParams = normalizeTimetableParams(currentFullTimetable.params);
+      saveTimetableRecord(store, currentFullTimetable, currentFullTimetable.source, currentFullTimetable.params);
+      if (validTimetableParams(currentFullTimetable.params)) {
+        const normalizedParams = normalizeTimetableParams(currentFullTimetable.params);
+        store.timetableParams = normalizedParams;
+        store.timetableParamsBySemester = store.timetableParamsBySemester || {};
+        store.timetableParamsBySemester[normalizedParams["semester.id"]] = normalizedParams;
+      }
       saveStore(store);
       finishBackgroundTimetableRead(currentFullTimetable);
     }
-    const storedTimetable = normalizeStoredTimetable(store.timetable, visibleTimetable);
+    const electionTable = findElectionTable();
+    const storedRecord = electionTable && !pageSemesterId
+      ? null
+      : getStoredTimetableRecord(store, pageSemesterId);
+    const storedTimetable = normalizeStoredTimetable(storedRecord, visibleTimetable);
     const storedIsFull = storedTimetable && /^完整课表/.test(storedTimetable.source || "");
     const storedIsCurrentFull = storedTimetable && storedTimetable.source === "当前完整课表页面";
     state.timetable = currentFullTimetable || (storedIsFull || storedIsCurrentFull ? storedTimetable : null) || visibleTimetable || storedTimetable || null;
     state.courses = parseElectionRows();
     state.lastElectionSignature = getElectionSignature();
 
-    if (visibleTimetable && !findElectionTable() && !currentFullTimetable) {
-      store.timetable = serializeTimetable(visibleTimetable, visibleTimetable.source);
+    if (visibleTimetable && !electionTable && !currentFullTimetable) {
+      saveTimetableRecord(store, visibleTimetable, visibleTimetable.source, validTimetableParams(pageParams) ? pageParams : null);
       saveStore(store);
     }
 
@@ -1538,7 +1648,10 @@
     const queue = state.courses
       .filter((course) => !course.detail)
       .filter((course) => course.detailUrl)
-      .filter((course) => findConflicts(course, state.timetable).length === 0)
+      .filter((course) => {
+        const result = evaluateCourse(course);
+        return result.timeKnown && result.noConflict;
+      })
       .slice(0, DETAIL_FETCH_LIMIT);
 
     if (!queue.length) {
@@ -1654,7 +1767,7 @@
       row.classList.remove("chd-helper-match", "chd-helper-conflict", "chd-helper-unmatched", "chd-helper-hidden");
 
       if (result.matched) row.classList.add("chd-helper-match");
-      if (state.filters.noConflict && !result.noConflict) row.classList.add("chd-helper-conflict");
+      if (state.filters.noConflict && result.timeKnown && !result.noConflict) row.classList.add("chd-helper-conflict");
       if (!result.matched) row.classList.add("chd-helper-unmatched");
       if (!result.matched && state.filters.hideUnmatched) row.classList.add("chd-helper-hidden");
 
@@ -1671,6 +1784,8 @@
 
     if (!course.slots.length) {
       panel.append(createBadge("unknown", "时间未知"));
+    } else if (!result.timetableKnown) {
+      panel.append(createBadge("unknown", "课表未知"));
     } else if (hasActiveDetailFilters() && result.noConflict && !course.detail) {
       panel.append(createBadge("unknown", "详情未知"));
     } else if (result.noConflict) {
@@ -1857,3 +1972,4 @@
     boot();
   }
 })();
+
